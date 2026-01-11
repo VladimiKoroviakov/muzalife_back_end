@@ -4,6 +4,8 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { constructFullUrl } from '../utils/urlHelper.js';
+import { verificationService } from '../services/verificationService.js';
+import { emailService } from '../services/emailService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -33,7 +35,7 @@ export const getProfile = async (req, res) => {
         avatar_url: constructFullUrl(req, user.user_avatar_url),
         authProvider: user.user_auth_provider,
         createdAt: user.user_created_at,
-        is_admin: user.is_admin  // Add this field
+        is_admin: user.is_admin
       }
     };
     
@@ -46,70 +48,244 @@ export const getProfile = async (req, res) => {
 };
 
 /**
- * Update user profile
+ * Update user name
  */
-export const updateProfile = async (req, res) => {
+export const updateName = async (req, res) => {
   try {
-    const { name, email } = req.body;
+    const { name } = req.body;
     const userId = req.userId;
 
-    if (!name && !email) {
-      return res.status(400).json({ error: 'No fields to update' });
+    if (!name) {
+      return res.status(400).json({ error: 'Name is required' });
     }
 
-    // Check if email is already taken by another user
-    if (email) {
-      const existingUser = await query(
-        'SELECT user_id FROM Users WHERE user_email = $1 AND user_id != $2',
-        [email, userId]
-      );
+    const result = await query(`
+        UPDATE Users
+        SET user_name = $1,
+            user_updated_at = CURRENT_TIMESTAMP
+        WHERE user_id = $2
+        RETURNING user_id, user_email, user_name
+    `, [name, userId]);
 
-      if (existingUser.rows.length > 0) {
-        return res.status(400).json({ error: 'Email already in use' });
-      }
-    }
-
-    // Build dynamic update query
-    const updates = [];
-    const values = [];
-    let paramCount = 1;
-
-    if (name) {
-      updates.push(`user_name = $${paramCount}`);
-      values.push(name);
-      paramCount++;
-    }
-
-    if (email) {
-      updates.push(`user_email = $${paramCount}`);
-      values.push(email);
-      paramCount++;
-    }
-
-    values.push(userId);
-
-    const queryText = `
-      UPDATE Users 
-      SET ${updates.join(', ')}, user_updated_at = CURRENT_TIMESTAMP 
-      WHERE user_id = $${paramCount} 
-      RETURNING user_id, user_email, user_name
-    `;
-
-    const result = await query(queryText, values);
-    
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    res.json({ 
+    res.json({
       success: true,
       user: result.rows[0]
     });
   } catch (error) {
-    console.error('Update profile error:', error);
+    console.error('Update name error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 };
+
+// ---------- Email Change Handlers ----------
+/** 
+ * Initiate email change
+ */
+export const initiateEmailChange = async (req, res) => {
+  try {
+    const { newEmail, id } = req.body;
+
+    if (!newEmail || !id) {
+      return res.status(400).json({ error: 'Всі поля обов\'язкові' });
+    }
+
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(newEmail)) {
+      return res.status(400).json({ error: 'Невірний формат email' });
+    }
+
+    // Get current user info
+    const userResult = await query(
+      'SELECT user_email FROM Users WHERE user_id = $1',
+      [id]
+    );
+
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Користувача не знайдено' });
+    }
+
+    const currentEmail = userResult.rows[0].user_email;
+
+    // Check if new email is the same as current
+    if (newEmail === currentEmail) {
+      return res.status(400).json({ error: 'Новий email не може бути таким же як поточний' });
+    }
+
+    // Check if new email is already used by another user
+    const existingUser = await query(
+      'SELECT user_id FROM Users WHERE user_email = $1 AND user_id != $2',
+      [newEmail, id]
+    );
+
+    if (existingUser.rows.length > 0) {
+      return res.status(400).json({ 
+        error: 'Цей email вже зайнятий іншим користувачем',
+        code: 'EMAIL_EXISTS'
+      });
+    }
+
+    // Check if there's a pending email change
+    const hasPendingChange = await verificationService.hasPendingVerification(newEmail);
+    if (hasPendingChange) {
+      return res.status(400).json({
+        error: 'Код підтвердження для зміни email вже відправлено. Перевірте вашу пошту.',
+        code: 'PENDING_EMAIL_CHANGE'
+      });
+    }
+
+    // Generate and send verification code
+    const verificationCode = await verificationService.createVerificationCode(
+      newEmail,
+      'email_change',
+    );
+
+    // Send verification email to new email address
+    await emailService.sendVerificationEmail(newEmail, verificationCode, 'email_change');
+
+    res.status(200).json({
+      success: true,
+      message: 'Код підтвердження відправлено на нову email адресу',
+      email: newEmail,
+      currentEmail: currentEmail
+    });
+  } catch (error) {
+    console.error('Email change initiation error:', error);
+    res.status(500).json({ 
+      error: 'Внутрішня помилка сервера',
+      details: error.message 
+    }); 
+  }
+};
+
+/** 
+ * Verify email change
+ */
+export const verifyEmailChange = async (req, res) => {
+  try {
+    const { newEmail, verificationCode, userId } = req.body;
+
+    if (!newEmail || !verificationCode || !userId) {
+      return res.status(400).json({ error: 'Всі поля обов\'язкові' });
+    }
+
+    // Verify the code
+    const verificationResult = await verificationService.verifyCode(
+      newEmail, 
+      verificationCode
+    );
+
+    if (!verificationResult.isValid) {
+      return res.status(400).json({ 
+        error: verificationResult.message,
+        code: 'INVALID_VERIFICATION_CODE'
+      });
+    }
+
+     // Check if email still doesn't exist (double-check)
+    const existingUser = await query(
+      'SELECT user_id FROM Users WHERE user_email = $1',
+      [newEmail]
+    );
+
+    if (existingUser.rows.length > 0) {
+      return res.status(400).json({ 
+        error: 'Користувач з таким email вже існує',
+        code: 'USER_EXISTS'
+      });
+    }
+
+    // Update user's email
+    const result = await query(
+      'UPDATE Users SET user_email = $1 WHERE user_id = $2 RETURNING user_id, user_email',
+      [newEmail, userId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Користувача не знайдено' });
+    }
+
+    // Send notification to old email
+    // TO DO: Implement sending notification to old email about the change
+
+    // Clear codes related to this email change
+    await query(
+      'DELETE FROM EmailVerificationCodes WHERE email = $1 AND code = $2',
+      [newEmail, verificationCode]
+    );
+
+    res.status(200).json({
+      success: true,
+      message: 'Email успішно змінено',
+      user: {
+        id: result.rows[0].user_id,
+        email: result.rows[0].user_email
+      }
+    });
+  } catch (error) {
+    console.error('Email change verification error:', error);
+    res.status(500).json({ 
+      error: 'Внутрішня помилка сервера',
+      details: error.message 
+    });
+  }
+};
+
+/**
+ * Resend email change code
+ */
+export const resendEmailChangeCode = async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({ error: 'Email обов\'язковий' });
+    }
+
+    // Check if new email is already used by another user
+    const existingUser = await query(
+      'SELECT user_id FROM Users WHERE user_email = $1',
+      [email]
+    );
+
+    if (existingUser.rows.length > 0) {
+      return res.status(400).json({ 
+        error: 'Цей email вже зайнятий іншим користувачем',
+        code: 'EMAIL_EXISTS'
+      });
+    }
+    
+    // Generate new code
+    const newCode = await verificationService.createVerificationCode(
+      email, 
+      'email_change'
+    );
+
+    // Send new verification email
+    await emailService.sendVerificationEmail(email, newCode);
+
+    res.status(200).json({
+      success: true,
+      message: 'Новий код підтвердження відправлено',
+      email: email
+    });
+  } catch (error) {
+    console.error('Resend email change code error:', error);
+
+    if (error.message === 'Failed to send verification email') {
+      return res.status(500).json({ 
+        error: 'Не вдалося відправити email. Спробуйте ще раз пізніше.' 
+      });
+    }
+
+    res.status(500).json({ error: 'Внутрішня помилка сервера' });
+  }
+};
+
 
 /**
  * Change password

@@ -2,24 +2,113 @@ import bcrypt from 'bcryptjs';
 import { query } from '../config/database.js';
 import { generateToken } from '../utils/jwt.js';
 import axios from 'axios';
+import { verificationService } from '../services/verificationService.js';
+import { emailService } from '../services/emailService.js';
 
-export const register = async (req, res) => {
+export const initiateRegistration = async (req, res) => {
   try {
     const { email, password, name } = req.body;
 
     // Basic validation
     if (!email || !password || !name) {
-      return res.status(400).json({ error: 'All fields are required' });
+      return res.status(400).json({ error: 'Всі поля обов\'язкові' });
     }
 
-    // Check if user exists
+    // Check if user already exists
     const existingUser = await query(
       'SELECT user_id FROM Users WHERE user_email = $1',
       [email]
     );
 
     if (existingUser.rows.length > 0) {
-      return res.status(400).json({ error: 'User already exists' });
+      return res.status(400).json({ 
+        error: 'Користувач з таким email вже існує',
+        code: 'USER_EXISTS'
+      });
+    }
+
+    // Check if there's a pending verification
+    const hasPendingVerification = await verificationService.hasPendingVerification(email);
+    if (hasPendingVerification) {
+      return res.status(400).json({
+        error: 'Код підтвердження вже відправлено на цей email. Перевірте вашу пошту.',
+        code: 'PENDING_VERIFICATION'
+      });
+    }
+
+    // Generate verification code
+    const verificationCode = await verificationService.createVerificationCode(email, 'registration');
+    
+    // Try to send email
+    try {
+      await emailService.sendVerificationEmail(email, verificationCode);
+      
+      // Return success response
+      const response = {
+        success: true,
+        message: 'Код підтвердження відправлено на вашу електронну пошту',
+        email: email,
+        name: name,
+      };
+      
+      res.status(200).json(response);
+      
+    } catch (emailError) {
+      console.error('Email sending error:', emailError.message);
+      
+      // Cleanup: remove the created verification code
+      await query(
+        'DELETE FROM EmailVerificationCodes WHERE email = $1 AND code = $2',
+        [email, verificationCode]
+      );
+      
+      return res.status(500).json({ 
+        error: 'Не вдалося відправити email з підтвердженням. Спробуйте ще раз.',
+        code: 'EMAIL_SEND_FAILED'
+      });
+    }
+  } catch (error) {
+    console.error('Registration initiation error:', error);
+    res.status(500).json({ 
+      error: 'Внутрішня помилка сервера',
+      details: error.message
+    });
+  }
+};
+
+export const verifyEmailAndRegister = async (req, res) => {
+  try {
+    const { email, password, name, verificationCode } = req.body;
+
+    // Validate required fields
+    if (!email || !password || !name || !verificationCode) {
+      return res.status(400).json({ error: 'Всі поля обов\'язкові' });
+    }
+
+    // Verify the code
+    const verificationResult = await verificationService.verifyCode(
+      email, 
+      verificationCode
+    );
+    
+    if (!verificationResult.isValid) {
+      return res.status(400).json({ 
+        error: verificationResult.message,
+        code: 'INVALID_VERIFICATION_CODE'
+      });
+    }
+
+    // Check if user still doesn't exist (double-check)
+    const existingUser = await query(
+      'SELECT user_id FROM Users WHERE user_email = $1',
+      [email]
+    );
+
+    if (existingUser.rows.length > 0) {
+      return res.status(400).json({ 
+        error: 'Користувач з таким email вже існує',
+        code: 'USER_EXISTS'
+      });
     }
 
     // Hash password
@@ -35,6 +124,11 @@ export const register = async (req, res) => {
     const user = result.rows[0];
     const token = generateToken(user.user_id);
 
+    await query(
+      'DELETE FROM EmailVerificationCodes WHERE email = $1 AND code = $2',
+      [email, verificationCode]
+    );
+
     res.status(201).json({
       user: {
         id: user.user_id,
@@ -46,9 +140,57 @@ export const register = async (req, res) => {
     });
   } catch (error) {
     console.error('Registration error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: 'Внутрішня помилка сервера' });
   }
 };
+
+export const resendVerificationCode = async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({ error: 'Email обов\'язковий' });
+    }
+
+    // Check if user already exists
+    const existingUser = await query(
+      'SELECT user_id FROM Users WHERE user_email = $1',
+      [email]
+    );
+
+    if (existingUser.rows.length > 0) {
+      return res.status(400).json({ 
+        error: 'Користувач з таким email вже існує',
+        code: 'USER_EXISTS'
+      });
+    }
+
+    // Generate new verification code
+    const verificationCode = await verificationService.createVerificationCode(
+      email, 
+      'registration'
+    );
+    
+    // Send new verification email
+    await emailService.sendVerificationEmail(email, verificationCode);
+
+    res.status(200).json({
+      success: true,
+      message: 'Новий код підтвердження відправлено на вашу електронну пошту'
+    });
+  } catch (error) {
+    console.error('Resend verification error:', error);
+    
+    if (error.message === 'Failed to send verification email') {
+      return res.status(500).json({ 
+        error: 'Не вдалося відправити email. Спробуйте ще раз пізніше.' 
+      });
+    }
+    
+    res.status(500).json({ error: 'Внутрішня помилка сервера' });
+  }
+};
+
 
 export const login = async (req, res) => {
   try {
@@ -330,35 +472,5 @@ export const facebookAuth = async (req, res) => {
     res.status(500).json({ 
       error: 'An unexpected error occurred during Facebook authentication.' 
     });
-  }
-};
-
-export const getCurrentUser = async (req, res) => {
-  try {
-    const result = await query(
-      'SELECT user_id, user_email, user_name, user_avatar_url, user_auth_provider, user_created_at, is_admin FROM Users WHERE user_id = $1',
-      [req.userId]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-
-    const user = result.rows[0];
-    
-    res.json({ 
-      user: {
-        id: user.user_id,
-        email: user.user_email,
-        name: user.user_name,
-        avatar_url: user.user_avatar_url,
-        auth_provider: user.user_auth_provider,
-        created_at: user.user_created_at,
-        is_admin: user.is_admin
-      }
-    });
-  } catch (error) {
-    console.error('Get user error:', error);
-    res.status(500).json({ error: 'Internal server error' });
   }
 };

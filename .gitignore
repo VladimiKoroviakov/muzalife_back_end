@@ -1,7 +1,22 @@
+# Dependency directories
 node_modules/
+
+# Build output
+dist/
+
+# Upload directories
 uploads/
 
+# Environment variables
 .env
+.env.*
+
+# Local SSL certs
+*.pem
 
 # macOS system files
 .DS_Store
+.vscode/
+
+#Ignore vscode AI rules
+.github/instructions/codacy.instructions.md

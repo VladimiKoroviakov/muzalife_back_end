@@ -1,15 +1,21 @@
 import express from 'express';
 import { 
-  register, 
+  initiateRegistration, 
+  verifyEmailAndRegister, 
+  resendVerificationCode,
   login, 
   googleAuth, 
-  facebookAuth,
-  getCurrentUser 
+  facebookAuth
 } from '../controllers/authController.js';
 
 const router = express.Router();
 
-router.post('/register', register);
+// Registration routes
+router.post('/register/initiate', initiateRegistration);
+router.post('/register/verify', verifyEmailAndRegister);
+router.post('/register/resend-code', resendVerificationCode);
+
+// Login routes
 router.post('/login', login);
 router.post('/google', googleAuth);
 router.post('/facebook', facebookAuth);

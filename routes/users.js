@@ -1,12 +1,15 @@
 import express from 'express';
 import { 
   getProfile,
-  updateProfile,
+  updateName,
   changePassword,
   uploadProfileImage,
   removeProfileImage,
   deleteAccount,
-  resendMaterial
+  resendMaterial,
+  initiateEmailChange,
+  verifyEmailChange,
+  resendEmailChangeCode
 } from '../controllers/usersController.js';
 import { authenticateToken } from '../middleware/auth.js';
 import multer from 'multer';
@@ -49,11 +52,16 @@ router.use(authenticateToken);
 
 // Profile routes
 router.get('/profile', getProfile);
-router.put('/profile', updateProfile);
+router.put('/profile/name', updateName);
 router.post('/change-password', changePassword);
 router.post('/profile/image', upload.single('image'), uploadProfileImage);
 router.delete('/profile/image', removeProfileImage);
 router.delete('/account', deleteAccount);
+
+// Email change routes
+router.post('/email/change/initiate', initiateEmailChange);
+router.post('/email/change/verify', verifyEmailChange);
+router.post('/email/change/resend-code', resendEmailChangeCode);
 
 // Material routes
 router.post('/resend-material', resendMaterial);

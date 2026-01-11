@@ -49,7 +49,7 @@ app.use(express.json());
 // Serve static files from uploads directory
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-// Debug middleware - log all incoming requests (optional)
+// Debug middleware
 app.use((req, res, next) => {
   console.log(`${new Date().toISOString()} - ${req.method} ${req.url}`);
   next();
@@ -81,7 +81,6 @@ app.get('/api/info', (req, res) => {
         login: 'POST /api/auth/login',
         google: 'POST /api/auth/google',
         facebook: 'POST /api/auth/facebook',
-        me: 'GET /api/auth/me (protected)',
       },
       users: {
         getAllUsers: 'GET /api/users (admin only)',
