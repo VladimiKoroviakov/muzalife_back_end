@@ -1,92 +1,123 @@
 import express from 'express';
-import pool from "../config/database.js";
+import { query } from '../config/database.js';
+import { authenticateToken } from '../middleware/auth.js';
 
 const router = express.Router();
 
-// Get bought products for the authenticated user
-router.get('/', async (req, res) => {
+// Get bought product IDs (similar to saved products /ids endpoint)
+router.get('/ids', authenticateToken, async (req, res) => {
   try {
-    const userId = req.user.user_id;
-
-    const result = await pool.query(`
-      SELECT bp.*, p.name AS product_name, p.description AS product_description
-      FROM BoughtProducts bp
-      JOIN Products p ON bp.product_id = p.product_id
-      WHERE bp.user_id = $1
-      ORDER BY bp.purchase_date DESC
-    `, [userId]);
-
+    const userId = req.userId;
+    
+    const result = await query(
+      'SELECT product_id FROM BoughtUserProducts WHERE user_id = $1 ORDER BY bought_at DESC',
+      [userId]
+    );
+    
+    const productIds = result.rows.map(row => row.product_id);
+    
     res.json({
       success: true,
-      boughtProducts: result.rows
+      data: productIds
     });
   } catch (error) {
-    console.error('Error fetching bought products:', error);
+    console.error('Error fetching bought product IDs:', error);
     res.status(500).json({
       success: false,
-      error: 'Failed to fetch bought products',
-      details: error.message
+      error: 'Failed to fetch bought product IDs'
     });
   }
 });
 
-// Add a new bought product record
-router.post('/', async (req, res) => {
+// Add a product to bought products (record a purchase)
+router.post('/', authenticateToken, async (req, res) => {
   try {
-    const userId = req.user.user_id;
-    const { productId, purchaseDate, amount } = req.body;
+    const userId = req.userId;
+    const { productId } = req.body;
 
-    const result = await pool.query(`
-      INSERT INTO BoughtProducts (user_id, product_id, purchase_date)
-      VALUES ($1, $2, $3, $4)
-      RETURNING *
-    `, [userId, productId, purchaseDate]);
+    if (!productId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Product ID is required'
+      });
+    }
+
+    // Check if product exists
+    const productCheck = await query(
+      'SELECT product_id FROM Products WHERE product_id = $1',
+      [productId]
+    );
+
+    if (productCheck.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Product not found'
+      });
+    }
+
+    // Check if already bought (optional - you might want to allow multiple purchases)
+    // If you want to prevent duplicates, uncomment this:
+    /*
+    const existingPurchase = await query(
+      'SELECT * FROM BoughtUserProducts WHERE user_id = $1 AND product_id = $2',
+      [userId, productId]
+    );
+
+    if (existingPurchase.rows.length > 0) {
+      return res.status(409).json({
+        success: false,
+        error: 'Product already purchased'
+      });
+    }
+    */
+
+    // Record the purchase
+    await query(
+      'INSERT INTO BoughtUserProducts (user_id, product_id) VALUES ($1, $2)',
+      [userId, productId]
+    );
 
     res.status(201).json({
-      success: true,
-      boughtProduct: result.rows[0]
+      success: true
     });
   } catch (error) {
-    console.error('Error adding bought product:', error);
+    console.error('Error recording purchase:', error);
     res.status(500).json({
       success: false,
-      error: 'Failed to add bought product',
-      details: error.message
+      error: 'Failed to record purchase'
     });
   }
-}); 
+});
 
-// Delete a bought product record
-router.delete('/:boughtProductId', async (req, res) => {
+// Remove a product from bought products (optional - you might not want to allow this)
+router.delete('/:productId', authenticateToken, async (req, res) => {
   try {
-    const userId = req.user.user_id;
-    const { boughtProductId } = req.params;
+    const userId = req.userId;
+    const { productId } = req.params;
 
-    const result = await pool.query(`
-      DELETE FROM BoughtProducts
-      WHERE bought_product_id = $1 AND user_id = $2
-      RETURNING *
-    `, [boughtProductId, userId]);
+    const result = await query(
+      'DELETE FROM BoughtUserProducts WHERE user_id = $1 AND product_id = $2',
+      [userId, productId]
+    );
 
     if (result.rowCount === 0) {
       return res.status(404).json({
         success: false,
-        error: 'Bought product not found or not owned by user'
+        error: 'Purchased product not found'
       });
     }
 
     res.json({
-      success: true,
-      message: 'Bought product deleted successfully'
+      success: true
     });
   } catch (error) {
-    console.error('Error deleting bought product:', error);
+    console.error('Error removing purchased product:', error);
     res.status(500).json({
       success: false,
-      error: 'Failed to delete bought product',
-      details: error.message
+      error: 'Failed to remove purchased product'
     });
   }
 });
+
 
 export default router;
