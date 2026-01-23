@@ -3,7 +3,7 @@ import {
   submitReview, 
   getProductReviews,
   getReviewById,
-  updateReview,
+  // updateReview,
   deleteReview
 } from '../controllers/reviewsController.js';
 import { authenticateToken } from '../middleware/auth.js';
@@ -18,7 +18,7 @@ router.get('/:reviewId', getReviewById);
 // Protected routes (require authentication)
 router.use(authenticateToken);
 router.post('/', submitReview);
-router.put('/:reviewId', updateReview);
+// router.put('/:reviewId', updateReview);
 router.delete('/:reviewId', deleteReview);
 
 export default router;
